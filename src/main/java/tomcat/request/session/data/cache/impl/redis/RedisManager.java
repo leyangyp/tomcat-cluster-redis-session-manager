@@ -130,6 +130,23 @@ abstract class RedisManager implements DataCache {
         } while (retry && tries <= NUM_RETRIES);
         return retVal;
     }
+    
+    @Override
+    public Long ttl(String key) {
+        int tries = 0;
+        boolean retry = true;
+        Long retVal = null;
+        do {
+            tries++;
+            try (Jedis jedis = this.pool.getResource()) {
+                retVal = jedis.ttl(key);
+                retry = false;
+            } catch (JedisConnectionException ex) {
+                handleException(tries, ex);
+            }
+        } while (retry && tries <= NUM_RETRIES);
+        return retVal;
+    }
 
     /**
      * To handle jedis exception.

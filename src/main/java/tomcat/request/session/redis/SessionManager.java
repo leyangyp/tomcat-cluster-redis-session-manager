@@ -1,5 +1,11 @@
 package tomcat.request.session.redis;
 
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.Set;
+
 import org.apache.catalina.Context;
 import org.apache.catalina.Lifecycle;
 import org.apache.catalina.LifecycleException;
@@ -7,8 +13,10 @@ import org.apache.catalina.LifecycleListener;
 import org.apache.catalina.LifecycleState;
 import org.apache.catalina.Valve;
 import org.apache.catalina.session.ManagerBase;
+import org.apache.tomcat.util.codec.binary.Base64;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import tomcat.request.session.constant.SessionConstants;
 import tomcat.request.session.constant.SessionConstants.SessionPolicy;
 import tomcat.request.session.data.cache.DataCache;
@@ -20,12 +28,6 @@ import tomcat.request.session.model.SessionMetadata;
 import tomcat.request.session.model.SingleSignOnEntry;
 import tomcat.request.session.util.ConfigUtil;
 import tomcat.request.session.util.SerializationUtil;
-
-import java.io.IOException;
-import java.lang.reflect.Method;
-import java.util.Arrays;
-import java.util.EnumSet;
-import java.util.Set;
 
 /** author: Ranjith Manickam @ 12 Jul' 2018 */
 public class SessionManager extends ManagerBase implements Lifecycle {
@@ -192,7 +194,9 @@ public class SessionManager extends ManagerBase implements Lifecycle {
     /** {@inheritDoc} */
     @Override
     public void remove(org.apache.catalina.Session session, boolean update) {
+    	System.out.println("delete session ["+session.getId()+"]");
         this.dataCache.delete(session.getId());
+        this.sessions.remove(session.getId());
     }
 
     /** {@inheritDoc} */
@@ -214,7 +218,7 @@ public class SessionManager extends ManagerBase implements Lifecycle {
             this.ssoTimeout = config.getRedisSSOTimeout();
             this.dataCache = new DataCacheFactory(config, getSessionTimeout(null)).getDataCache();
             this.serializer = new SerializationUtil();
-
+//            this.localSessions = new ConcurrentHashMap<>();
             Context context = getContextIns();
             ClassLoader loader = (context != null && context.getLoader() != null) ? context.getLoader().getClassLoader() : null;
             this.serializer.setClassLoader(loader);
@@ -229,16 +233,13 @@ public class SessionManager extends ManagerBase implements Lifecycle {
     /** To save session object to data cache. */
     public void save(org.apache.catalina.Session session, boolean forceSave) {
         try {
-            Boolean isPersisted;
+            Boolean isPersisted = null;
             Session newSession = (Session) session;
-            byte[] hash = (this.sessionContext.get() != null && this.sessionContext.get().getMetadata() != null)
-                    ? this.sessionContext.get().getMetadata().getAttributesHash() : null;
             byte[] currentHash = this.serializer.getSessionAttributesHashCode(newSession);
-
             if (forceSave
                     || newSession.isDirty()
                     || (isPersisted = (this.sessionContext.get() != null) ? this.sessionContext.get().isPersisted() : null) == null
-                    || !isPersisted || !Arrays.equals(hash, currentHash)) {
+                    || !isPersisted) {
 
                 SessionMetadata metadata = new SessionMetadata();
                 metadata.setAttributesHash(currentHash);
@@ -247,10 +248,18 @@ public class SessionManager extends ManagerBase implements Lifecycle {
                 newSession.resetDirtyTracking();
                 setValues(true, metadata);
             }
-
+            if(LOGGER.isDebugEnabled()) {
+            	byte[] hash = (this.sessionContext.get() != null && this.sessionContext.get().getMetadata() != null)
+                        ? this.sessionContext.get().getMetadata().getAttributesHash() : null;
+            	String currentHashStr = Base64.encodeBase64String(currentHash);
+                String hashStr = Base64.encodeBase64String(hash);
+            	LOGGER.debug("Session [" + newSession.getId() + "] saved. forceSave:"+forceSave+", isDirty:"+newSession.isDirty()+", isPersisted:"+isPersisted+", hash:"+hashStr+", curHash:"+currentHashStr);
+            }
             int timeout = getSessionTimeout(newSession);
             this.dataCache.expire(newSession.getId(), timeout);
-            LOGGER.debug("Session [" + newSession.getId() + "] expire in [" + timeout + "] seconds.");
+            this.sessions.put(newSession.getId(), newSession);
+            if(LOGGER.isDebugEnabled())
+            	LOGGER.debug("Session [" + newSession.getId() + "] expire in [" + timeout + "] seconds.");
 
         } catch (IOException ex) {
             LOGGER.error("Error occurred while saving the session object in data cache..", ex);
@@ -263,6 +272,8 @@ public class SessionManager extends ManagerBase implements Lifecycle {
         try {
             session = (this.sessionContext.get() != null) ? this.sessionContext.get().getSession() : null;
             if (session != null) {
+            	if(LOGGER.isDebugEnabled())
+            		LOGGER.debug("afterRequest Session [" + session.getId() + "]");
                 if (session.isValid()) {
                     save(session, getAlwaysSaveAfterRequest());
                 } else {
@@ -282,7 +293,8 @@ public class SessionManager extends ManagerBase implements Lifecycle {
     private int getSessionTimeout(Session session) {
         int timeout = getContextIns().getSessionTimeout() * 60;
         int sessionTimeout = (session == null) ? 0 : session.getMaxInactiveInterval();
-        return (sessionTimeout < timeout) ? (Math.max(timeout, 1800)) : sessionTimeout;
+//        return (sessionTimeout < timeout) ? (Math.max(timeout, 1800)) : sessionTimeout;
+        return (sessionTimeout < timeout) ? timeout : sessionTimeout;
     }
 
     /** To set values to session context. */
@@ -380,5 +392,20 @@ public class SessionManager extends ManagerBase implements Lifecycle {
     /** To delete single-sign-on entry from cache. */
     void deleteSingleSignOnEntry(String ssoId) {
         this.dataCache.delete(ssoId);
+    }
+    
+    public void processExpires() {
+    	if(LOGGER.isDebugEnabled())
+    		LOGGER.debug("processExpires sessions:"+this.sessions.size());
+    	Session[] sessions = this.sessions.values().toArray(new Session[0]);
+    	for(Session session : sessions) {
+    		Long ttl = this.dataCache.ttl(session.getId());
+    		if(ttl == -2) {	// key不存在时jedis.ttl返回-2
+    			// 过期了
+    			if(LOGGER.isDebugEnabled())
+    				LOGGER.debug("processExpires expire session "+session.getId());
+                session.expire(true);
+    		}
+    	}
     }
 }

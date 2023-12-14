@@ -142,4 +142,9 @@ public class RedisCache implements DataCache {
         }
         return nodes;
     }
+
+	@Override
+	public Long ttl(String key) {
+		return this.dataCache.ttl(key);
+	}
 }

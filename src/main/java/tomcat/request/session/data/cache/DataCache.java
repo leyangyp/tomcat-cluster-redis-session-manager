@@ -53,4 +53,11 @@ public interface DataCache {
      * @return - Returns true, if the key exists.
      */
     Boolean exists(String key);
+    
+    /**
+     * ttl time
+     * @param key
+     * @return
+     */
+    Long ttl(String key);
 }
